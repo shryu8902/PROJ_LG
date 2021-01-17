@@ -42,6 +42,9 @@ PATH = './DATA'
 #%%
 train_err  = pd.read_csv(PATH+'/train_err_data.csv')
 train_err['time'] = pd.to_datetime(train_err.time,format= '%Y%m%d%H%M%S')
+test_err = pd.read_csv(PATH+'/test_err_data.csv')
+test_err['time'] = pd.to_datetime(test_err.time,format= '%Y%m%d%H%M%S')
+
 display(train_err.head())
 train_user_id_max = 24999
 train_user_id_min = 10000
@@ -142,7 +145,7 @@ train_prob['time'] = pd.to_datetime(train_prob.time,format= '%Y%m%d%H%M%S')
 problem = np.zeros(15000)
 problem[train_prob.user_id.unique()-10000] = 1 
 train_y = pd.DataFrame({'uid':range(10000,25000),'problem':problem})
-train_y['smooth']=train_y['problem']*0.8+0.1
+train_y['smooth']=train_y['problem']*0.6+0.2
 
 #%%
 test_file_list = glob.glob('./DATA/test_err/*.pkl')
@@ -255,11 +258,11 @@ params =      {
 #%%
 #-------------------------------------------------------------------------------------
 # 5 Kfold cross validation
-col_list=['uid', 'min', '25%', '50%', 
-    'Hmin', 'H25%', 'H50%',
-    'Mmin', 'M25%', 'M50%', 
-    'type2', 'code2', 'type3', 'code3', 'type4', 'code4',
-       'type5', 'code5', 'diff0']
+col_list=['uid', 'min', '25%', '50%','75%', 
+    'Hmin', 'H25%', 'H50%','H75%',
+    'Mmin', 'M25%', 'M50%', 'M75%',
+    'type1','code1','type2', 'code2', 'type3', 'code3', 'type4', 'code4',
+       'type5', 'code5', 'diff0','diff1','diff5']+train_ecumsum.columns.to_list()
 
 use_col_list=['X11', 'X14', 'X15', 'X16', 'X17', 'X18', 'X20', 'X30', 'X31', 'X34',
        'X35', 'X42', 'count', 'mean', 'std', 'max', 'Hcount', 'Hmean', 'Hstd',
@@ -327,12 +330,12 @@ for i in tqdm(range(len(pred))):
 sample_submission.to_csv("./dacon_baseline3.csv", index = False)
 #%% catboost grid search
 
-model = CatBoostClassifier(loss_function='Logloss',eval_metric='AUC')
-train_data = Pool(data=train_x_t,label=train_y.problem,
-                cat_features=['type1','code1','model_nm','fwver'])
-grid = {'learning_rate': [0.03, 0.1],
-        'depth': [4, 6, 8, 10],
-        'l2_leaf_reg': [1, 3, 5, 7, 9]}
+model = CatBoostClassifier(loss_function='CrossEntropy',eval_metric='AUC')
+train_data = Pool(data=train_x_t,label=train_y.smooth,
+                cat_features=['model_nm','fwver'])
+grid = {'learning_rate': [0.1],
+        'depth': [6, 8, 10],
+        'l2_leaf_reg': [7, 9, 12, 15]}
 grid_search_result = model.grid_search(grid, 
                                        X=train_data)
 
@@ -350,23 +353,24 @@ for train_idx, val_idx in k_fold.split(train_x_t,train_y.problem):
     print(train_idx.shape)
     # split train, validation set
     X = train_x_t.iloc[train_idx]
-    y = train_y.problem[train_idx]
+    y = train_y.smooth[train_idx]
     valid_x = train_x_t.iloc[val_idx]
     valid_y = train_y.problem[val_idx]
    
     #run traning
-    for seed in range(1):
-        model = CatBoostClassifier(iterations=1000,
-                            loss_function='Logloss',
+    for seed in range(3):
+        model = CatBoostClassifier(iterations=1500,
+                            loss_function='CrossEntropy',
                             random_seed=seed,
                             eval_metric='AUC',
-                            depth=8,
-                            l2_leaf_reg=2,
-                            auto_class_weights='Balanced',
+                            depth=10,
+                            l2_leaf_reg=20,
+                            learning_rate=0.03,
+                            # auto_class_weights='Balanced',
                             verbose=True)
 
         # train the model   ## cat_features=info_columns
-        model.fit(X, y,cat_features =['type1','code1','model_nm','fwver'],eval_set=(valid_x,valid_y),early_stopping_rounds=100)
+        model.fit(X, y,cat_features =['model_nm','fwver'],eval_set=(valid_x,valid_y),early_stopping_rounds=100)
         # model.fit(X, y,eval_set=(valid_x,valid_y),early_stopping_rounds=50)
 
         # cal valid prediction
@@ -377,13 +381,13 @@ for train_idx, val_idx in k_fold.split(train_x_t,train_y.problem):
         # valid_pred=[0 if x[0]>x[1] else 1 for x in valid_prob]
         valid_prob_1 = [x[1] for x in valid_prob]
         # cal scores
-        recall    = recall_score(    valid_y, valid_pred)
-        precision = precision_score( valid_y, valid_pred)
-        auc_score = roc_auc_score(   valid_y, valid_prob_1)
+        # recall    = recall_score(    valid_y, valid_pred)
+        # precision = precision_score( valid_y, valid_pred)
+        # auc_score = roc_auc_score(   valid_y, valid_prob_1)
 
-        # recall = recall_score(train_y.problem[val_idx], valid_pred)
-        # precision = precision_score(train_y.problem[val_idx], valid_pred)
-        # auc_score = roc_auc_score(   train_y.problem[val_idx], valid_prob_1)
+        recall = recall_score(train_y.problem[val_idx], valid_pred)
+        precision = precision_score(train_y.problem[val_idx], valid_pred)
+        auc_score = roc_auc_score(   train_y.problem[val_idx], valid_prob_1)
 
         # append scores
         models.append(model)
@@ -392,9 +396,14 @@ for train_idx, val_idx in k_fold.split(train_x_t,train_y.problem):
         auc_scores.append(auc_score)
         print('==========================================================')
 #%%
-
+select_model=[]
+for i in range(len(models)):
+    print(models[i].best_score_['validation'])
+    if models[i].best_score_['validation']['AUC']>=0.81:
+        select_model.append(i)
 pred_y_list = []
-for model in models:
+for i in select_model:
+    model=models[i]
     pred_y = model.predict_proba(test_x_t)
     pred_y_= np.array([x[1] for x in pred_y])
     pred_y_list.append(pred_y_.reshape(-1,1))
@@ -407,7 +416,7 @@ for i in tqdm(range(len(pred))):
     uid,prob = pred.iloc[i]
     # sample_submission.loc.set_value(uid,'problem',prob)
     sample_submission.loc[uid,'problem']=prob
-sample_submission.to_csv("./dacon_baseline_cat3.csv", index = False)
+sample_submission.to_csv("./dacon_baseline_cat_cross_en2.csv", index = False)
 #%%
 
 model = CatBoostClassifier(iterations=1000,
